@@ -86,10 +86,40 @@
    */
   const Star = function () {
     const colors = ['#ffffff', '#ffe9c4', '#d4fbff'];
+    const radii = [0.3, 0.4, 0.4, 0.5];
 
     this.center = new Point(Math.random() * canvas.width, Math.random() * canvas.height);
-    this.radius = 0.4;
-    this.color = colors[Math.floor(Math.random() * 3)];
+    this.radius = radii[Math.floor(Math.random() * radii.length)];
+    this.color = colors[Math.floor(Math.random() * colors.length)];
+
+    // Make some stars bigger and brighter
+    if (Math.random() > 0.99) {
+      this.color = '#ffff00';
+      this.radius = 0.8;
+    }
+
+    /**
+     * Move star to the next position.
+     */
+    this.move = function () {
+      if (this.center.x < 0 || this.center.x > canvas.width || this.center.y < 0 || this.center.y > canvas.height) {
+        return this.reset();
+      }
+
+      const center = new Point(canvas.width / 2, canvas.height / 2);
+
+      this.center = new Point(
+        this.center.x + (this.center.x - center.x) / 2500,
+        this.center.y + (this.center.y - center.y) / 2500
+      );
+    }
+
+    /**
+     * Reset star position.
+     */
+    this.reset = function () {
+      this.center = new Point(Math.random() * canvas.width, Math.random() * canvas.height);
+    }
 
     /**
      * Draw star on canvas.
@@ -122,6 +152,7 @@
    */
   function drawStars() {
     stars.forEach(function (star) {
+      star.move();
       star.draw();
     });
   }
@@ -131,11 +162,45 @@
    *
    * @param {string} src Path to the image
    * @param {Size} size Size of the object
+   * @param {Object} [hooks] Callback functions
+   * @param {Function} [hooks.preDraw] Callback function before drawing the object
    * @constructor
    */
-  const AstronomicalObject = function (src, size) {
+  const AstronomicalObject = function (src, size, hooks = {}) {
     this.image = new Image(size.width, size.height);
     this.image.src = src;
+    this.hooks = hooks;
+
+    /**
+     * Call hook function.
+     *
+     * @param {string} hookName Name of the hook
+     * @param {any} args Arguments for the hook function
+     * @private
+     */
+    this._callHook = function (hookName, ...args) {
+      if (typeof this.hooks[hookName] === 'function') {
+        return this.hooks[hookName](...args);
+      }
+    }
+
+    /**
+     * Get image of the astronomical object.
+     *
+     * @param {Point} point Center of the object
+     * @param {Angle} angle Rotation angle
+     * @returns {HTMLImageElement|*}
+     * @private
+     */
+    this._getImage = function (point, angle) {
+      const image = this._callHook('getImage', this.image, point, angle);
+
+      if (image) {
+        return image;
+      }
+
+      return this.image;
+    }
 
     /**
      * Draw astronomical object on canvas.
@@ -148,7 +213,10 @@
       ctx.save();
       ctx.translate(point.x, point.y);
       ctx.rotate(angle.toRadians());
-      ctx.drawImage(this.image, -this.image.width / 2, -this.image.height / 2, this.image.width, this.image.height);
+
+      this._callHook('preDraw', ctx);
+      ctx.drawImage(this._getImage(point, angle), -this.image.width / 2, -this.image.height / 2, this.image.width, this.image.height);
+
       ctx.restore();
     }
 
@@ -177,10 +245,12 @@
    * @param {string} src Path to the image
    * @param {Size} size Size of the object
    * @param {Time} turnoverTime Complete turnover time
+   * @param {Object} [hooks] Callback functions
+   * @param {Function} [hooks.preDraw] Callback function before drawing the object
    * @constructor
    */
-  const AstronomicalRotatedObject = function (src, size, turnoverTime) {
-    this.astronomicalObject = new AstronomicalObject(src, size);
+  const AstronomicalRotatedObject = function (src, size, turnoverTime, hooks = {}) {
+    this.astronomicalObject = new AstronomicalObject(src, size, hooks);
 
     const delta = Angle.getRotationDelta(turnoverTime);
     this.angle = new Angle(0);
@@ -202,14 +272,15 @@
    * @param {Point} center Center of the orbit
    * @param {number} radius Radius of the orbit
    * @param {Time} turnoverTime Complete turnover time
+   * @param {number} startAngle Start angle of the orbit
    * @constructor
    */
-  const Orbit = function (center, radius, turnoverTime) {
+  const Orbit = function (center, radius, turnoverTime, startAngle = 0) {
     this.center = center;
     this.radius = radius;
 
     const delta = Angle.getRotationDelta(turnoverTime);
-    this.angle = new Angle(0);
+    this.angle = new Angle(startAngle);
 
     /**
      * Get point on the orbit.
@@ -285,7 +356,13 @@
    */
   const Sun = function (center, turnoverTime) {
     this.center = center;
-    this.astronomicalObject = new AstronomicalRotatedObject('images/sun.png', new Size(80, 80), turnoverTime);
+    this.astronomicalObject = new AstronomicalRotatedObject('images/sun.png', new Size(80, 80), turnoverTime, {
+      preDraw: function (ctx) {
+        ctx.shadowInset = true;
+        ctx.shadowBlur = 25;
+        ctx.shadowColor = "#fff";
+      }
+    });
 
     /**
      * Draw sun on canvas.
@@ -302,24 +379,87 @@
    * @param {Size} size Size of the planet
    * @param {Time} turnoverTime Complete turnover time
    * @param {Orbit} orbit Orbit of the planet
-   * @param {Function} [satellitesFactory] Factory function for creating satellites
+   * @param {Function} [afterInitialization] Callback function after initialization
    * @constructor
    */
-  const Planet = function (src, size, turnoverTime, orbit, satellitesFactory) {
-    this.astronomicalObject = new AstronomicalRotatedObject(src, size, turnoverTime);
+  const Planet = function (src, size, turnoverTime, orbit, afterInitialization = null) {
+
+    const offScreenCanvas = document.createElement('canvas');
+    const offScreenCtx = offScreenCanvas.getContext('2d');
+
+    this.astronomicalObject = new AstronomicalRotatedObject(src, size, turnoverTime, {
+      getImage: function (image, point, planetAngle) {
+        offScreenCtx.clearRect(0, 0, offScreenCanvas.width, offScreenCanvas.height);
+
+        // Create a temporary canvas to work with the planet
+        offScreenCanvas.width = image.width;
+        offScreenCanvas.height = image.height;
+
+        const planetCenter = new Point(0, 0);
+        const distanceFromSunToPlanet = orbit.radius;
+        const planetToSunAngle = new Angle(180 + orbit.angle.degree - planetAngle.degree);
+        const sunCenter = new Point(
+          planetCenter.x + distanceFromSunToPlanet * Math.cos(planetToSunAngle.toRadians()),
+          planetCenter.y + distanceFromSunToPlanet * Math.sin(planetToSunAngle.toRadians())
+        );
+
+        const planetRadius = Math.max(image.width, image.height) / 2;
+        const innerRadius = distanceFromSunToPlanet - planetRadius;
+        const outerRadius = distanceFromSunToPlanet + planetRadius;
+
+        offScreenCtx.save();
+        // Draw the planet on the temporary canvas
+        offScreenCtx.translate(offScreenCanvas.width / 2, offScreenCanvas.height / 2);
+        offScreenCtx.drawImage(image, -image.width / 2, -image.height / 2, image.width, image.height);
+
+        // Create a gradient for the sun light
+        const gradient = ctx.createRadialGradient(sunCenter.x, sunCenter.y, innerRadius, sunCenter.x, sunCenter.y, outerRadius);
+        gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        gradient.addColorStop(0.3, 'rgba(0, 0, 0, 0)');
+        gradient.addColorStop(0.6, 'rgba(0, 0, 0, 0.6)');
+        gradient.addColorStop(0.9, 'rgba(0, 0, 0, 0.8)');
+
+        // Draw sun light on the temporary canvas
+        offScreenCtx.globalCompositeOperation = 'source-atop';
+        offScreenCtx.beginPath();
+        offScreenCtx.arc(sunCenter.x, sunCenter.y, innerRadius, 0, 2 * Math.PI);
+        offScreenCtx.arc(sunCenter.x, sunCenter.y, outerRadius, 0, 2 * Math.PI, true);
+        offScreenCtx.fillStyle = gradient;
+        offScreenCtx.fill();
+
+        offScreenCtx.restore();
+
+        return offScreenCanvas;
+      },
+    });
     this.orbit = orbit;
     this.center = this.orbit.getPoint();
-    this.satellites = typeof satellitesFactory === 'function' ? satellitesFactory(this) : [];
+    this.rings = [];
+    this.satellites = [];
+
+    if (typeof afterInitialization === 'function') {
+      afterInitialization(this);
+    }
+
+    /**
+     * Move planet to the next position.
+     */
+    this.move = function () {
+      this.center = this.orbit.getNextPoint();
+    }
 
     /**
      * Draw planet on canvas.
      */
     this.draw = function () {
-      this.center = this.orbit.getNextPoint();
-
       this.orbit.draw();
       this.astronomicalObject.draw(this.center);
+      this.rings.forEach(function (ring) {
+        ring.move();
+        ring.draw();
+      });
       this.satellites.forEach(function (satellite) {
+        satellite.move();
         satellite.draw();
       });
     }
@@ -330,8 +470,58 @@
    */
   function drawPlanets() {
     planets.forEach(function (planet) {
+      planet.move();
       planet.draw();
     });
+  }
+
+  /**
+   * Ring class constructor.
+   *
+   * @param {Planet} planet Planet which the ring belongs to
+   * @param {number} innerRadius Inner radius of the ring
+   * @param {number} outerRadius Outer radius of the ring
+   * @param {string} color Color of the ring
+   * @param {Time} turnoverTime Complete turnover time
+   * @constructor
+   */
+  const Ring = function (planet, innerRadius, outerRadius, color, turnoverTime) {
+    this.planet = planet;
+    this.center = planet.center;
+    this.innerRadius = innerRadius;
+    this.outerRadius = outerRadius;
+    this.color = color;
+    this.angle = new Angle(0);
+
+    const delta = Angle.getRotationDelta(turnoverTime);
+
+    /**
+     * Move ring to the next position.
+     */
+    this.move = function () {
+      this.center = this.planet.center;
+      this.angle = new Angle((this.angle.degree + delta) % 360);
+    }
+
+    /**
+     * Draw ring on canvas.
+     */
+    this.draw = function () {
+      const angleRadians = this.angle.toRadians();
+
+      ctx.save();
+      ctx.translate(this.center.x, this.center.y);
+      ctx.rotate(angleRadians);
+      ctx.transform(1, 0.3, 0, 1, 0, 0);
+
+      ctx.beginPath();
+      ctx.arc(0, 0, this.outerRadius, 0, 2 * Math.PI);
+      ctx.arc(0, 0, this.innerRadius, 0, 2 * Math.PI, true);
+      ctx.fillStyle = this.color;
+      ctx.fill();
+
+      ctx.restore();
+    }
   }
 
   /**
@@ -348,13 +538,21 @@
     this.astronomicalObject = new AstronomicalRotatedObject(src, size, turnoverTime);
     this.planet = planet;
     this.orbit = orbit;
+    this.center = this.orbit.getPoint();
+
+    /**
+     * Move satellite to the next position.
+     */
+    this.move = function () {
+      this.orbit.setCenter(this.planet.center);
+      this.center = this.orbit.getNextPoint();
+    }
 
     /**
      * Draw satellite on canvas.
      */
     this.draw = function () {
-      this.orbit.setCenter(this.planet.center);
-      this.astronomicalObject.draw(this.orbit.getNextPoint());
+      this.astronomicalObject.draw(this.center);
       this.orbit.draw();
     }
   }
@@ -368,19 +566,23 @@
     stars = createStars();
     sun = new Sun(center, new Time(30));
     planets = [
-      new Planet('images/mercury.png', new Size(10, 10), new Time(8.8), new Orbit(center, 60, new Time(8.8))),
-      new Planet('images/venus.png', new Size(10, 10), new Time(22.5), new Orbit(center, 80, new Time(22.5))),
-      new Planet('images/earth.png', new Size(30, 30), new Time(36.5), new Orbit(center, 120, new Time(36.5)), function (planet) {
-        return [
+      new Planet('images/mercury.png', new Size(10, 10), new Time(6), new Orbit(center, 60, new Time(8.8))),
+      new Planet('images/venus.png', new Size(10, 10), new Time(25), new Orbit(center, 80, new Time(22.5))),
+      new Planet('images/earth.png', new Size(30, 30), new Time(6.5), new Orbit(center, 120, new Time(36.5)), function (planet) {
+        planet.satellites = [
           new Satellite('images/moon.png', new Size(8, 8), new Time(2.73), planet, new Orbit(planet.center, 20, new Time(2.73))),
-        ]
+        ];
       }),
-      new Planet('images/mars.png', new Size(18, 18), new Time(42), new Orbit(center, 160, new Time(42))),
-      new Planet('images/jupiter.png', new Size(27, 27), new Time(57), new Orbit(center, 200, new Time(57))),
-      new Planet('images/saturn.png', new Size(27, 27), new Time(62), new Orbit(center, 240, new Time(62))),
-      new Planet('images/uranus.png', new Size(24, 24), new Time(74), new Orbit(center, 280, new Time(74))),
-      new Planet('images/neptune.png', new Size(24, 24), new Time(81), new Orbit(center, 320, new Time(81))),
-      new Planet('images/pluto.png', new Size(24, 24), new Time(90), new Orbit(center, 360, new Time(90))),
+      new Planet('images/mars.png', new Size(18, 18), new Time(8), new Orbit(center, 160, new Time(42))),
+      new Planet('images/jupiter.png', new Size(27, 27), new Time(24), new Orbit(center, 200, new Time(57))),
+      new Planet('images/saturn.png', new Size(27, 27), new Time(28), new Orbit(center, 240, new Time(62)), function (planet) {
+        planet.rings = [
+          new Ring(planet, 17, 20, 'rgba(200, 200, 200, 0.5)', new Time(16)),
+        ];
+      }),
+      new Planet('images/uranus.png', new Size(24, 24), new Time(34), new Orbit(center, 280, new Time(74))),
+      new Planet('images/neptune.png', new Size(24, 24), new Time(40), new Orbit(center, 320, new Time(81))),
+      new Planet('images/pluto.png', new Size(24, 24), new Time(44), new Orbit(center, 360, new Time(90))),
     ];
 
     draw();
